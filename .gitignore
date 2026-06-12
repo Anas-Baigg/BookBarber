@@ -3,7 +3,7 @@ CLAUDE.md
 # dependencies
 /node_modules
 /supabase
-/src
+
 
 /.pnp
 .pnp.js
