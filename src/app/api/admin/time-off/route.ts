@@ -11,6 +11,7 @@ import {
   sendBookingAssigned,
 } from '@/lib/emails';
 import type { UnavailabilityAction } from '@/types';
+import { createNotification } from '@/lib/notifications';
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
 
@@ -95,6 +96,15 @@ export async function PATCH(request: NextRequest) {
           });
         }
       } catch (err) { console.error('[admin/time-off PATCH deny] email failed:', err); }
+
+      await createNotification({
+        shopId:      employee.shop?.id ?? '',
+        recipientId: employee.user_id,
+        type:        'time_off_denied',
+        title:       'Time Off Not Approved',
+        body:        `Your time off request for ${req.date} was not approved${adminNotes ? `. ${adminNotes}` : ''}`,
+        employeeId:  employee.id,
+      });
     }
     return NextResponse.json({ ok: true });
   }
@@ -218,6 +228,15 @@ export async function PATCH(request: NextRequest) {
         });
       }
     } catch (err) { console.error('[admin/time-off approve] approval email failed:', err); }
+
+    await createNotification({
+      shopId:      employee.shop?.id ?? '',
+      recipientId: employee.user_id,
+      type:        'time_off_approved',
+      title:       'Time Off Approved',
+      body:        `Your time off request for ${date} has been approved`,
+      employeeId:  employee.id,
+    });
   }
 
   return NextResponse.json({ ok: true });

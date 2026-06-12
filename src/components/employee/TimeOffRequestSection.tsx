@@ -5,6 +5,7 @@ import { format, addDays } from 'date-fns';
 import type { TimeOffRequest } from '@/types';
 import { Calendar, Plus, X, Clock } from 'lucide-react';
 import Button from '@/components/ui/Button';
+import { createClient } from '@/lib/supabase/client';
 
 const STATUS_STYLES: Record<TimeOffRequest['status'], string> = {
   pending:  'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20',
@@ -14,16 +15,52 @@ const STATUS_STYLES: Record<TimeOffRequest['status'], string> = {
 
 interface Props {
   initialRequests: TimeOffRequest[];
+  employeeId:      string;
 }
 
-export default function TimeOffRequestSection({ initialRequests }: Props) {
-  const [requests, setRequests]     = useState<TimeOffRequest[]>(initialRequests);
-  const [showModal, setShowModal]   = useState(false);
-  const [date, setDate]             = useState(format(addDays(new Date(), 1), 'yyyy-MM-dd'));
-  const [reason, setReason]         = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError]           = useState('');
+export default function TimeOffRequestSection({ initialRequests, employeeId }: Props) {
+  const [requests,    setRequests]    = useState<TimeOffRequest[]>(initialRequests);
+  const [showModal,   setShowModal]   = useState(false);
+  const [date,        setDate]        = useState(format(addDays(new Date(), 1), 'yyyy-MM-dd'));
+  const [reason,      setReason]      = useState('');
+  const [submitting,  setSubmitting]  = useState(false);
+  const [error,       setError]       = useState('');
   const [withdrawing, setWithdrawing] = useState<string | null>(null);
+  const [statusAlert, setStatusAlert] = useState<{
+    type: 'approved' | 'denied'; date: string; notes: string | null;
+  } | null>(null);
+
+  // Realtime: watch for admin approvals/denials on this employee's TOR rows
+  useEffect(() => {
+    if (!employeeId) return;
+    const supabase = createClient();
+
+    const channel = supabase
+      .channel(`employee-tor-${employeeId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'time_off_requests', filter: `employee_id=eq.${employeeId}` },
+        (payload) => {
+          const updated = payload.new as TimeOffRequest;
+          const old     = payload.old as Partial<TimeOffRequest>;
+
+          setRequests((prev) =>
+            prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r))
+          );
+
+          // Show inline alert when a pending request gets a decision
+          if (old.status === 'pending' && (updated.status === 'approved' || updated.status === 'denied')) {
+            setStatusAlert({ type: updated.status, date: updated.date, notes: updated.admin_notes ?? null });
+            setTimeout(() => setStatusAlert(null), 5000);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [employeeId]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -79,6 +116,24 @@ export default function TimeOffRequestSection({ initialRequests }: Props) {
           Request Time Off
         </button>
       </div>
+
+      {/* Inline status alert — auto-dismisses after 5s */}
+      {statusAlert && (
+        <div className={`flex items-start justify-between gap-3 p-3 rounded-lg text-sm mb-3 ${
+          statusAlert.type === 'approved'
+            ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+            : 'bg-red-500/10 border border-red-500/20 text-red-400'
+        }`}>
+          <span>
+            {statusAlert.type === 'approved'
+              ? `Your time off on ${format(new Date(statusAlert.date + 'T12:00:00'), 'EEE, MMM d')} was approved`
+              : `Your time off on ${format(new Date(statusAlert.date + 'T12:00:00'), 'EEE, MMM d')} was not approved${statusAlert.notes ? `. ${statusAlert.notes}` : ''}`}
+          </span>
+          <button onClick={() => setStatusAlert(null)} className="flex-shrink-0 opacity-70 hover:opacity-100 transition-opacity">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {requests.length === 0 ? (
         <p className="text-xs text-gray-600 py-2">No requests yet.</p>

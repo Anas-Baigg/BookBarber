@@ -6,24 +6,27 @@ import { useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
 import type { Profile } from "@/types";
 import { Scissors, LogOut, Menu, X } from "lucide-react";
+import EmployeeNotificationBell from "@/components/employee/EmployeeNotificationBell";
 
 export default function Navbar() {
   const router = useRouter();
   const supabase = createClient();
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [userId, setUserId]   = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
-    async function fetchAndSetProfile(userId: string) {
+    async function fetchAndSetProfile(uid: string) {
+      setUserId(uid);
       const { data } = await supabase
         .from('profiles')
         .select('role, full_name, email')
-        .eq('id', userId)
+        .eq('id', uid)
         .single();
       if (data) {
         const p = data as { role: string; full_name: string | null; email: string };
         setProfile({
-          id:         userId,
+          id:         uid,
           email:      p.email ?? '',
           full_name:  p.full_name ?? null,
           role:       p.role as Profile['role'],
@@ -41,6 +44,7 @@ export default function Navbar() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'SIGNED_OUT' || !session) {
         setProfile(null);
+        setUserId(null);
       } else if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session.user) {
         fetchAndSetProfile(session.user.id);
       }
@@ -113,6 +117,9 @@ export default function Navbar() {
                   </Link>
                 )}
                 <span className="text-xs text-gray-600">{profile.email}</span>
+                {profile.role === 'employee' && userId && (
+                  <EmployeeNotificationBell userId={userId} />
+                )}
                 <button
                   onClick={handleSignOut}
                   className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-red-400 transition-colors px-3 py-2"
@@ -139,17 +146,22 @@ export default function Navbar() {
             )}
           </div>
 
-          {/* Mobile menu button */}
-          <button
-            className="md:hidden text-gray-400 hover:text-white"
-            onClick={() => setMenuOpen(!menuOpen)}
-          >
-            {menuOpen ? (
-              <X className="w-6 h-6" />
-            ) : (
-              <Menu className="w-6 h-6" />
+          {/* Mobile: bell (employees only) + hamburger — always visible */}
+          <div className="md:hidden flex items-center gap-1">
+            {profile?.role === 'employee' && userId && (
+              <EmployeeNotificationBell userId={userId} />
             )}
-          </button>
+            <button
+              className="text-gray-400 hover:text-white"
+              onClick={() => setMenuOpen(!menuOpen)}
+            >
+              {menuOpen ? (
+                <X className="w-6 h-6" />
+              ) : (
+                <Menu className="w-6 h-6" />
+              )}
+            </button>
+          </div>
         </div>
       </div>
 

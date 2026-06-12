@@ -174,6 +174,24 @@ export async function PATCH(
       });
     }
 
+    // Notify the assigned employee
+    {
+      const emp       = booking.employee as { id?: string; user_id?: string | null } | null;
+      const empUserId = emp?.user_id;
+      const empId     = emp?.id;
+      if (empUserId) {
+        await createNotification({
+          shopId:      booking.shop_id as string,
+          recipientId: empUserId,
+          type:        'booking_cancelled',
+          title:       'Booking Cancelled',
+          body:        `${emailBase.customerName}'s ${(booking.service_name as string | null) ?? 'appointment'} on ${formatDateTimeInZone(booking.start_time, emailBase.timezone)} was cancelled`,
+          bookingId:   booking.id,
+          employeeId:  empId,
+        });
+      }
+    }
+
     return NextResponse.json({ status: 'cancelled' });
   }
 
@@ -224,10 +242,11 @@ export async function PATCH(
     // Fix 2: verify newEmployeeId belongs to the same shop as the booking.
     // Combines the ownership check with the name fetch to save a round-trip.
     let newBarberName: string | undefined;
+    let newBarberUserId: string | null | undefined;
     if (newEmployeeId) {
       const { data: targetEmp } = await admin
         .from('employees')
-        .select('shop_id, name')
+        .select('shop_id, name, user_id')
         .eq('id', newEmployeeId)
         .single();
       if (!targetEmp || targetEmp.shop_id !== booking.shop_id) {
@@ -236,7 +255,8 @@ export async function PATCH(
           { status: 400 }
         );
       }
-      newBarberName = targetEmp.name;
+      newBarberName   = targetEmp.name;
+      newBarberUserId = targetEmp.user_id;
     }
 
     // Fix 3: duration-aware conflict check.
@@ -433,6 +453,22 @@ export async function PATCH(
         body:        `${emailBase.customerName} rescheduled their ${(booking.service_name as string | null) ?? 'appointment'} to ${formatDateTimeInZone(startTime, shopInfo?.timezone ?? 'UTC')}`,
         bookingId:   booking.id,
       });
+    }
+
+    // Notify the target employee (new barber if changed, original otherwise)
+    {
+      const origEmpUserId = (booking.employee as { user_id?: string | null } | null)?.user_id ?? null;
+      const targetEmpUserId = newEmployeeId ? (newBarberUserId ?? null) : origEmpUserId;
+      if (targetEmpUserId) {
+        await createNotification({
+          shopId:      booking.shop_id as string,
+          recipientId: targetEmpUserId,
+          type:        'booking_rescheduled',
+          title:       'Booking Rescheduled',
+          body:        `${emailBase.customerName}'s appointment was moved to ${formatDateTimeInZone(startTime, emailBase.timezone)}`,
+          bookingId:   booking.id,
+        });
+      }
     }
 
     return NextResponse.json(updated);

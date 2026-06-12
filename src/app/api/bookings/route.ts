@@ -445,5 +445,18 @@ export async function POST(request: NextRequest) {
     });
   }
 
+  // Notify the assigned employee
+  if (assignedEmployeeUserId) {
+    await createNotification({
+      shopId:      shopId,
+      recipientId: assignedEmployeeUserId,
+      type:        'new_booking',
+      title:       'New Booking',
+      body:        `${emailData.customerName} booked ${service.name} on ${formatDateTimeInZone(startTime, (shop?.timezone ?? 'UTC') as string)}`,
+      bookingId:   booking.id,
+      employeeId:  assignedEmployeeId,
+    });
+  }
+
   return NextResponse.json({ bookingId: booking.id }, { status: 201 });
 }

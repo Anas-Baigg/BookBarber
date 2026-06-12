@@ -163,6 +163,7 @@ export default async function EmployeePage() {
             todayBookings={todayBookings}
             nextAppointment={nextAppointment}
             timezone={timezone}
+            employeeId={employee.id}
           />
         </section>
 
@@ -241,7 +242,7 @@ export default async function EmployeePage() {
           )}
 
           {/* Time off requests (client: modal + list) */}
-          <TimeOffRequestSection initialRequests={timeOffRequests} />
+          <TimeOffRequestSection initialRequests={timeOffRequests} employeeId={employee.id} />
         </section>
 
         {/* ── Past appointments (client: self-fetching, paginated, searchable) */}

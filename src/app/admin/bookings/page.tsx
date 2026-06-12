@@ -51,7 +51,9 @@ export default function AdminBookingsPage() {
   const [rescheduleError, setRescheduleError]           = useState('');
   const [toast, setToast]                               = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
 
-  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchDebounceRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const realtimeDebounceRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pageRef              = useRef(1);
 
   // Tick every 30s so undo buttons disappear at the right time
   useEffect(() => {
@@ -92,6 +94,37 @@ export default function AdminBookingsPage() {
   }, [filterShop, filterStatus, filterDateFrom, filterDateTo, search]);
 
   useEffect(() => { fetchBookings(1); }, [fetchBookings]);
+
+  // Keep pageRef in sync so the Realtime handler can refetch the current page
+  useEffect(() => { pageRef.current = page; }, [page]);
+
+  // Realtime: refetch when any booking changes for this admin's shops (debounced 500ms)
+  useEffect(() => {
+    if (shops.length === 0) return;
+    const shopIds = new Set(shops.map((s) => s.id));
+    const client = createClient();
+
+    const channel = client
+      .channel('admin-bookings-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, (payload) => {
+        const shopId =
+          (payload.new as Record<string, unknown> | null)?.shop_id as string | undefined ??
+          (payload.old as Record<string, unknown> | null)?.shop_id as string | undefined;
+        if (!shopId || !shopIds.has(shopId)) return;
+
+        if (realtimeDebounceRef.current) clearTimeout(realtimeDebounceRef.current);
+        realtimeDebounceRef.current = setTimeout(() => {
+          fetchBookings(pageRef.current);
+        }, 500);
+      })
+      .subscribe();
+
+    return () => {
+      if (realtimeDebounceRef.current) clearTimeout(realtimeDebounceRef.current);
+      client.removeChannel(channel);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shops, fetchBookings]);
 
   // Debounce search input → commits to `search` state after 400 ms
   function handleSearchInput(value: string) {

@@ -6,7 +6,9 @@ type NotificationType =
   | 'booking_rescheduled'
   | 'time_off_requested'
   | 'time_off_withdrawn'
-  | 'employee_activated';
+  | 'employee_activated'
+  | 'time_off_approved'
+  | 'time_off_denied';
 
 interface CreateNotificationParams {
   shopId:      string;
