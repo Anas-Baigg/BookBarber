@@ -1,6 +1,7 @@
 'use client';
 
-import { format } from 'date-fns';
+import { useState } from 'react';
+import { format, addDays } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 import { formatDateTimeInZone } from '@/lib/utils';
 import Badge from '@/components/ui/Badge';
@@ -14,7 +15,6 @@ interface Props {
 
 function formatGroupHeading(dateStr: string, timezone: string): string {
   const d = new Date(dateStr + 'T12:00:00');
-  const today    = format(toZonedTime(new Date(), timezone), 'yyyy-MM-dd');
   const tomorrow = format(toZonedTime(new Date(Date.now() + 86400000), timezone), 'yyyy-MM-dd');
   const label = format(d, 'EEEE, MMMM d');
   if (dateStr === tomorrow) return `Tomorrow — ${label}`;
@@ -22,10 +22,12 @@ function formatGroupHeading(dateStr: string, timezone: string): string {
 }
 
 export default function UpcomingAppointmentsSection({ upcomingBookings, timezone }: Props) {
+  const [showAll, setShowAll] = useState(false);
+
   const pending   = upcomingBookings.filter((b) => b.status === 'pending_reschedule');
   const confirmed = upcomingBookings.filter((b) => b.status !== 'pending_reschedule');
 
-  // Group confirmed/rescheduled by date in shop timezone
+  // Group confirmed/rescheduled/checked_in by date in shop timezone
   const groups: Record<string, BookingWithDetails[]> = {};
   for (const b of confirmed) {
     const day = format(toZonedTime(new Date(b.start_time), timezone), 'yyyy-MM-dd');
@@ -33,11 +35,17 @@ export default function UpcomingAppointmentsSection({ upcomingBookings, timezone
   }
   const sortedDays = Object.keys(groups).sort();
 
+  // 14-day window cutoff — always visible by default
+  const cutoffDate = format(toZonedTime(addDays(new Date(), 14), timezone), 'yyyy-MM-dd');
+  const visibleDays = showAll ? sortedDays : sortedDays.filter((d) => d <= cutoffDate);
+  const hiddenDays  = sortedDays.filter((d) => d > cutoffDate);
+  const hiddenCount = hiddenDays.reduce((sum, d) => sum + groups[d].length, 0);
+
   if (pending.length === 0 && confirmed.length === 0) return null;
 
   return (
     <div className="mb-8 space-y-6">
-      {/* Pending customer action section */}
+      {/* Pending customer action section — always fully shown, not subject to 14-day fold */}
       {pending.length > 0 && (
         <div>
           <h2 className="text-base font-semibold mb-3 flex items-center gap-2 text-orange-400">
@@ -72,7 +80,7 @@ export default function UpcomingAppointmentsSection({ upcomingBookings, timezone
         </div>
       )}
 
-      {/* Upcoming appointments grouped by date */}
+      {/* Upcoming appointments grouped by date — first 14 days by default */}
       {confirmed.length > 0 && (
         <div>
           <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
@@ -80,7 +88,7 @@ export default function UpcomingAppointmentsSection({ upcomingBookings, timezone
             Upcoming Appointments
           </h2>
           <div className="space-y-5">
-            {sortedDays.map((day) => (
+            {visibleDays.map((day) => (
               <div key={day}>
                 <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 px-1">
                   {formatGroupHeading(day, timezone)}
@@ -110,6 +118,18 @@ export default function UpcomingAppointmentsSection({ upcomingBookings, timezone
               </div>
             ))}
           </div>
+
+          {/* Show more / show less toggle — only appears when there are bookings beyond 14 days */}
+          {hiddenCount > 0 && (
+            <button
+              onClick={() => setShowAll((prev) => !prev)}
+              className="mt-4 w-full py-2.5 text-sm text-gray-400 hover:text-white border border-dark-300 hover:border-dark-200 rounded-xl transition-colors"
+            >
+              {showAll
+                ? 'Show less'
+                : `Show ${hiddenCount} more appointment${hiddenCount !== 1 ? 's' : ''}`}
+            </button>
+          )}
         </div>
       )}
     </div>

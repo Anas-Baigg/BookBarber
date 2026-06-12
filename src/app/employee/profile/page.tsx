@@ -188,6 +188,11 @@ export default function EmployeeProfilePage() {
     if (updateError) {
       setPwError(updateError.message);
     } else {
+      try {
+        await fetch('/api/auth/revoke-other-sessions', { method: 'POST' });
+      } catch {
+        // session revocation failure must not block success confirmation
+      }
       setPwSaved(true);
       setCurrentPassword('');
       setNewPassword('');

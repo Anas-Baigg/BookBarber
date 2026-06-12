@@ -6,7 +6,7 @@ import { getDayName } from '@/lib/utils';
 import { getTodayBoundsUTC } from '@/lib/booking-time';
 import type { BookingWithDetails, EmployeeWithSchedule, EmployeeScheduleOverride, TimeOffRequest } from '@/types';
 import { User, Scissors, AlertTriangle } from 'lucide-react';
-import { format, addDays } from 'date-fns';
+import { format, addDays, subDays } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 import TodayAppointmentsSection from '@/components/employee/TodayAppointmentsSection';
 import UpcomingAppointmentsSection from '@/components/employee/UpcomingAppointmentsSection';
@@ -22,7 +22,7 @@ export default async function EmployeePage() {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('*')
+    .select('id, full_name, email, role')
     .eq('id', user.id)
     .single();
 
@@ -67,7 +67,8 @@ export default async function EmployeePage() {
   const [
     { data: rawTodayBookings },
     { data: rawUpcomingBookings },
-    { data: rawNextAppointment },
+    { data: rawCheckedIn },
+    { data: rawNextConfirmed },
     { data: rawOverrides },
     { data: rawTimeOffRequests },
   ] = await Promise.all([
@@ -93,7 +94,19 @@ export default async function EmployeePage() {
       .lte('start_time', sixtyDaysOut)
       .order('start_time', { ascending: true }),
 
-    // Next single confirmed appointment
+    // Currently in chair (checked_in today) — preferred over next confirmed
+    supabase
+      .from('bookings')
+      .select(`*, employee:employees(id, name), shop:shops(id, name, timezone),
+               customer:profiles!bookings_customer_id_fkey(id, full_name, email)`)
+      .eq('employee_id', employee.id)
+      .eq('status', 'checked_in')
+      .gte('start_time', todayStart.toISOString())
+      .lte('start_time', todayEnd.toISOString())
+      .order('start_time', { ascending: true })
+      .limit(1),
+
+    // Next confirmed appointment (future)
     supabase
       .from('bookings')
       .select(`*, employee:employees(id, name), shop:shops(id, name, timezone),
@@ -114,17 +127,21 @@ export default async function EmployeePage() {
       .lte('date', format(toZonedTime(addDays(now, 30), timezone), 'yyyy-MM-dd'))
       .order('date', { ascending: true }),
 
-    // Time off requests
+    // Time off requests: last 90 days + all pending — prevents unbounded scan over time
     supabase
       .from('time_off_requests')
       .select('*')
       .eq('employee_id', employee.id)
-      .order('date', { ascending: true }),
+      .or(`date.gte.${format(subDays(now, 90), 'yyyy-MM-dd')},status.eq.pending`)
+      .order('date', { ascending: false })
+      .limit(50),
   ]);
 
   const todayBookings   = (rawTodayBookings   as BookingWithDetails[]) ?? [];
   const upcomingBookings = (rawUpcomingBookings as BookingWithDetails[]) ?? [];
-  const nextAppointment  = ((rawNextAppointment as BookingWithDetails[]) ?? [])[0] ?? null;
+  const checkedInNow     = ((rawCheckedIn      as BookingWithDetails[]) ?? [])[0] ?? null;
+  const nextConfirmedApt = ((rawNextConfirmed  as BookingWithDetails[]) ?? [])[0] ?? null;
+  const nextAppointment  = checkedInNow ?? nextConfirmedApt;
   const upcomingOverrides = (rawOverrides as EmployeeScheduleOverride[]) ?? [];
   const timeOffRequests  = (rawTimeOffRequests as TimeOffRequest[]) ?? [];
 
