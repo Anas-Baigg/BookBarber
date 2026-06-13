@@ -6,8 +6,8 @@ import { getDayName } from '@/lib/utils';
 import { getTodayBoundsUTC } from '@/lib/booking-time';
 import type { BookingWithDetails, EmployeeWithSchedule, EmployeeScheduleOverride, TimeOffRequest } from '@/types';
 import { User, Scissors, AlertTriangle } from 'lucide-react';
-import { format, addDays, subDays } from 'date-fns';
-import { toZonedTime } from 'date-fns-tz';
+import { format, addDays, subDays, startOfWeek } from 'date-fns';
+import { toZonedTime, fromZonedTime } from 'date-fns-tz';
 import TodayAppointmentsSection from '@/components/employee/TodayAppointmentsSection';
 import UpcomingAppointmentsSection from '@/components/employee/UpcomingAppointmentsSection';
 import PastBookingsSection from '@/components/employee/PastBookingsSection';
@@ -63,7 +63,15 @@ export default async function EmployeePage() {
   const { start: todayStart, end: todayEnd } = getTodayBoundsUTC(timezone);
   const sixtyDaysOut = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString();
 
-  // Five parallel targeted queries — no past bookings in initial load
+  // Stats date boundaries in shop timezone
+  const nowZoned       = toZonedTime(now, timezone);
+  const weekStartZoned = startOfWeek(nowZoned, { weekStartsOn: 1 }); // Monday
+  const weekStartStr   = format(weekStartZoned, 'yyyy-MM-dd');
+  const monthStartStr  = `${format(nowZoned, 'yyyy-MM')}-01`;
+  const startOfWeekUTC  = fromZonedTime(`${weekStartStr}T00:00:00`, timezone);
+  const startOfMonthUTC = fromZonedTime(`${monthStartStr}T00:00:00`, timezone);
+
+  // Six parallel targeted queries — no past bookings in initial load
   const [
     { data: rawTodayBookings },
     { data: rawUpcomingBookings },
@@ -71,6 +79,7 @@ export default async function EmployeePage() {
     { data: rawNextConfirmed },
     { data: rawOverrides },
     { data: rawTimeOffRequests },
+    { data: rawStatsBookings },
   ] = await Promise.all([
     // Today's: non-cancelled bookings within today's timezone-aware bounds
     supabase
@@ -135,15 +144,66 @@ export default async function EmployeePage() {
       .or(`date.gte.${format(subDays(now, 90), 'yyyy-MM-dd')},status.eq.pending`)
       .order('date', { ascending: false })
       .limit(50),
+
+    // Stats: bookings this month for completion rate + week count derivation
+    supabase
+      .from('bookings')
+      .select('id, status, start_time')
+      .eq('employee_id', employee.id)
+      .gte('start_time', startOfMonthUTC.toISOString())
+      .in('status', ['confirmed', 'checked_in', 'completed', 'no_show']),
   ]);
 
-  const todayBookings   = (rawTodayBookings   as BookingWithDetails[]) ?? [];
+  const todayBookings    = (rawTodayBookings    as BookingWithDetails[]) ?? [];
   const upcomingBookings = (rawUpcomingBookings as BookingWithDetails[]) ?? [];
-  const checkedInNow     = ((rawCheckedIn      as BookingWithDetails[]) ?? [])[0] ?? null;
-  const nextConfirmedApt = ((rawNextConfirmed  as BookingWithDetails[]) ?? [])[0] ?? null;
+  const checkedInNow     = ((rawCheckedIn       as BookingWithDetails[]) ?? [])[0] ?? null;
+  const nextConfirmedApt = ((rawNextConfirmed   as BookingWithDetails[]) ?? [])[0] ?? null;
   const nextAppointment  = checkedInNow ?? nextConfirmedApt;
   const upcomingOverrides = (rawOverrides as EmployeeScheduleOverride[]) ?? [];
   const timeOffRequests  = (rawTimeOffRequests as TimeOffRequest[]) ?? [];
+
+  // ── Stats derivation ────────────────────────────────────────────────────
+  const statsBookings    = (rawStatsBookings ?? []) as { status: string; start_time: string }[];
+  const startOfWeekUTCStr = startOfWeekUTC.toISOString();
+  const todayCount        = todayBookings.length;
+  const weekCount         = statsBookings.filter((b) => b.start_time >= startOfWeekUTCStr).length;
+  const monthCompleted    = statsBookings.filter((b) => b.status === 'completed').length;
+  const monthNoShow       = statsBookings.filter((b) => b.status === 'no_show').length;
+  const completionRate    = (monthCompleted + monthNoShow) > 0
+    ? Math.round((monthCompleted / (monthCompleted + monthNoShow)) * 100)
+    : null;
+
+  // ── Customer history — previous visits at this shop for today's customers ──
+  const uniqueCustomerIds = Array.from(
+    new Set(
+      todayBookings
+        .map((b) => b.customer?.id)
+        .filter((id): id is string => !!id)
+    )
+  );
+
+  let customerHistory: Record<string, { visitCount: number; lastVisitDate: string | null }> = {};
+  if (uniqueCustomerIds.length > 0) {
+    const { data: pastVisits } = await supabase
+      .from('bookings')
+      .select('customer_id, start_time')
+      .in('customer_id', uniqueCustomerIds)
+      .eq('shop_id', shopData?.id ?? '')
+      .in('status', ['confirmed', 'completed', 'checked_in', 'no_show'])
+      .lt('start_time', todayStart.toISOString())
+      .order('start_time', { ascending: false });
+
+    for (const rawVisit of pastVisits ?? []) {
+      const visit = rawVisit as { customer_id?: string; start_time: string };
+      const cid   = visit.customer_id;
+      if (!cid) continue;
+      if (!customerHistory[cid]) customerHistory[cid] = { visitCount: 0, lastVisitDate: null };
+      customerHistory[cid].visitCount++;
+      if (!customerHistory[cid].lastVisitDate) {
+        customerHistory[cid].lastVisitDate = visit.start_time;
+      }
+    }
+  }
 
   return (
     <div className="min-h-screen bg-dark">
@@ -157,6 +217,24 @@ export default async function EmployeePage() {
           </p>
         </div>
 
+        {/* ── Personal stats strip ───────────────────────────────────────── */}
+        <div className="grid grid-cols-3 gap-3 mb-8">
+          <div className="p-4 bg-dark-100 border border-dark-300 rounded-xl text-center">
+            <div className="text-2xl font-bold text-gold">{todayCount}</div>
+            <div className="text-xs text-gray-500 mt-1">Today</div>
+          </div>
+          <div className="p-4 bg-dark-100 border border-dark-300 rounded-xl text-center">
+            <div className="text-2xl font-bold text-gold">{weekCount}</div>
+            <div className="text-xs text-gray-500 mt-1">This Week</div>
+          </div>
+          <div className="p-4 bg-dark-100 border border-dark-300 rounded-xl text-center">
+            <div className="text-2xl font-bold text-gold">
+              {completionRate !== null ? `${completionRate}%` : '—'}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">Completion Rate</div>
+          </div>
+        </div>
+
         {/* ── Next appointment + Today's appointments (client: status transitions) */}
         <section className="mb-8">
           <TodayAppointmentsSection
@@ -164,6 +242,7 @@ export default async function EmployeePage() {
             nextAppointment={nextAppointment}
             timezone={timezone}
             employeeId={employee.id}
+            customerHistory={customerHistory}
           />
         </section>
 

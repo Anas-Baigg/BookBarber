@@ -67,9 +67,11 @@ export async function PATCH(
 
   if (!booking) return NextResponse.json({ error: 'Booking not found' }, { status: 404 });
 
-  const isCustomer = booking.customer_id === user.id;
-  const isOwner    = booking.shop?.owner_id === user.id;
-  if (!isCustomer && !isOwner) {
+  const isCustomer         = booking.customer_id === user.id;
+  const isOwner            = booking.shop?.owner_id === user.id;
+  const empRecord          = booking.employee as { id?: string; user_id?: string | null } | null;
+  const isAssignedEmployee = !!empRecord?.user_id && empRecord.user_id === user.id;
+  if (!isCustomer && !isOwner && !isAssignedEmployee) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
@@ -121,6 +123,8 @@ export async function PATCH(
     // Bug 3: admin may also cancel checked_in; customers may also cancel pending_reschedule (Fix 1)
     const cancellable = isOwner
       ? ['confirmed', 'rescheduled', 'checked_in']
+      : isAssignedEmployee
+      ? ['confirmed']
       : ['confirmed', 'rescheduled', 'pending_reschedule'];
     if (!cancellable.includes(booking.status as string)) {
       return NextResponse.json(
@@ -144,13 +148,13 @@ export async function PATCH(
 
     if (emailBase.customerEmail) {
       try {
-        await sendBookingCancellation({ ...emailBase, cancelledBy: isCustomer ? 'customer' : 'admin' });
+        await sendBookingCancellation({ ...emailBase, cancelledBy: isCustomer ? 'customer' : 'shop' });
       } catch (err) {
         console.error('[bookings PATCH cancel] customer email failed:', err);
       }
     }
 
-    if (isCustomer && adminProfile?.email) {
+    if ((isCustomer || isAssignedEmployee) && adminProfile?.email) {
       try {
         await sendAdminCancellationNotice({ adminEmail: adminProfile.email, ...emailBase });
       } catch (err) {
@@ -158,11 +162,13 @@ export async function PATCH(
       }
     }
 
-    // Notify the assigned employee regardless of who cancelled
-    const cancelReason = isCustomer ? 'Cancelled by customer' : 'Cancelled by admin';
-    await notifyEmployeeCancelled(cancelReason);
+    // Skip employee notification when the employee is the one cancelling
+    const cancelReason = isCustomer ? 'Cancelled by customer' : 'Cancelled by shop';
+    if (!isAssignedEmployee) {
+      await notifyEmployeeCancelled(cancelReason);
+    }
 
-    if (isCustomer && booking.shop?.owner_id) {
+    if ((isCustomer || isAssignedEmployee) && booking.shop?.owner_id) {
       const shopInfo = booking.shop as unknown as { id: string; owner_id: string; timezone: string } | null;
       await createNotification({
         shopId:      booking.shop_id as string,
@@ -174,11 +180,10 @@ export async function PATCH(
       });
     }
 
-    // Notify the assigned employee
-    {
-      const emp       = booking.employee as { id?: string; user_id?: string | null } | null;
-      const empUserId = emp?.user_id;
-      const empId     = emp?.id;
+    // Notify the assigned employee — skip when the employee is the one cancelling
+    if (!isAssignedEmployee) {
+      const empUserId = empRecord?.user_id;
+      const empId     = empRecord?.id;
       if (empUserId) {
         await createNotification({
           shopId:      booking.shop_id as string,
@@ -472,6 +477,26 @@ export async function PATCH(
     }
 
     return NextResponse.json(updated);
+  }
+
+  // ── Update notes ──────────────────────────────────────────────────────────
+  if (action === 'update_notes') {
+    if (!isAssignedEmployee) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+    const { notes } = body as { notes?: unknown };
+    if (typeof notes !== 'string') {
+      return NextResponse.json({ error: 'notes must be a string' }, { status: 400 });
+    }
+    if (notes.length > 500) {
+      return NextResponse.json({ error: 'Notes cannot exceed 500 characters' }, { status: 400 });
+    }
+    const { error: notesErr } = await admin
+      .from('bookings')
+      .update({ notes })
+      .eq('id', bookingId);
+    if (notesErr) return NextResponse.json({ error: notesErr.message }, { status: 500 });
+    return NextResponse.json({ notes });
   }
 
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 });

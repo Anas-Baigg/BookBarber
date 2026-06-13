@@ -2,20 +2,21 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
-import { parseISO, format } from 'date-fns';
+import { parseISO, format, formatDistanceToNow } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 import { formatDateTimeInZone, formatTimeInZone } from '@/lib/utils';
 import { getTodayBoundsUTC } from '@/lib/booking-time';
 import { createClient } from '@/lib/supabase/client';
 import Badge from '@/components/ui/Badge';
 import type { BookingWithDetails, BookingStatus } from '@/types';
-import { Calendar, Clock, CheckCircle, UserX, Scissors } from 'lucide-react';
+import { Calendar, Clock, CheckCircle, UserX, Scissors, Pencil } from 'lucide-react';
 
 interface Props {
   todayBookings:   BookingWithDetails[];
   nextAppointment: BookingWithDetails | null;
   timezone:        string;
   employeeId:      string;
+  customerHistory: Record<string, { visitCount: number; lastVisitDate: string | null }>;
 }
 
 type LocalBookings = Record<string, BookingStatus>;
@@ -34,15 +35,28 @@ function timeUntil(isoTime: string, timezone: string): string {
   return rem > 0 ? `in ${hrs}h ${rem}m` : `in ${hrs}h`;
 }
 
-export default function TodayAppointmentsSection({ todayBookings, nextAppointment, timezone, employeeId }: Props) {
-  const [localStatus,        setLocalStatus]        = useState<LocalBookings>({});
-  const [confirmNoShow,      setConfirmNoShow]      = useState<string | null>(null);
-  const [transitioning,      setTransitioning]      = useState<string | null>(null);
-  const [transitionErrors,   setTransitionErrors]   = useState<Record<string, string>>({});
-  const [now,                setNow]                = useState(() => new Date());
-  const [localBookings,      setLocalBookings]      = useState<BookingWithDetails[]>(todayBookings);
-  const [localNextApt,       setLocalNextApt]       = useState<BookingWithDetails | null>(nextAppointment);
-  const [highlightedIds,     setHighlightedIds]     = useState<Record<string, boolean>>({});
+export default function TodayAppointmentsSection({
+  todayBookings,
+  nextAppointment,
+  timezone,
+  employeeId,
+  customerHistory,
+}: Props) {
+  const [localStatus,      setLocalStatus]      = useState<LocalBookings>({});
+  const [confirmNoShow,    setConfirmNoShow]    = useState<string | null>(null);
+  const [confirmCancel,    setConfirmCancel]    = useState<string | null>(null);
+  const [transitioning,    setTransitioning]    = useState<string | null>(null);
+  const [cancelling,       setCancelling]       = useState<string | null>(null);
+  const [transitionErrors, setTransitionErrors] = useState<Record<string, string>>({});
+  const [cancelErrors,     setCancelErrors]     = useState<Record<string, string>>({});
+  const [editingNotesId,   setEditingNotesId]   = useState<string | null>(null);
+  const [notesDraft,       setNotesDraft]       = useState<Record<string, string>>({});
+  const [notesSaving,      setNotesSaving]      = useState<string | null>(null);
+  const [notesErrors,      setNotesErrors]      = useState<Record<string, string>>({});
+  const [now,              setNow]              = useState(() => new Date());
+  const [localBookings,    setLocalBookings]    = useState<BookingWithDetails[]>(todayBookings);
+  const [localNextApt,     setLocalNextApt]     = useState<BookingWithDetails | null>(nextAppointment);
+  const [highlightedIds,   setHighlightedIds]   = useState<Record<string, boolean>>({});
   const timelineRef = useRef<HTMLDivElement>(null);
 
   // Tick every 30 seconds so relative times and button visibility stay current
@@ -75,17 +89,14 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
         (payload) => {
           if (payload.eventType === 'INSERT') {
             const row = payload.new as BookingWithDetails;
-            // Only add to today's list if start_time falls within today's shop-local bounds
             const { start: todayStart, end: todayEnd } = getTodayBoundsUTC(timezone);
             const bookingStart = parseISO(row.start_time);
             if (bookingStart >= todayStart && bookingStart <= todayEnd) {
               setLocalBookings((prev) => {
-                // Insert in chronological order, avoid duplicate
                 if (prev.some((b) => b.id === row.id)) return prev;
                 return [...prev, row].sort((a, b) => a.start_time.localeCompare(b.start_time));
               });
               flashHighlight(row.id);
-              // If it's checked_in and earlier than current next apt, promote it
               if (row.status === 'checked_in') {
                 setLocalNextApt((prev) => {
                   if (!prev || bookingStart < parseISO(prev.start_time)) return row;
@@ -98,12 +109,10 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
             setLocalBookings((prev) =>
               prev.map((b) =>
                 b.id === row.id
-                  // Merge: keep joined customer/employee/shop from existing booking
                   ? { ...b, ...row, customer: b.customer, employee: b.employee, shop: b.shop }
                   : b
               )
             );
-            // Update highlight card if this is the next appointment
             setLocalNextApt((prev) => {
               if (!prev || prev.id !== row.id) return prev;
               return { ...prev, ...row, customer: prev.customer, employee: prev.employee, shop: prev.shop };
@@ -131,6 +140,7 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
   async function transition(bookingId: string, newStatus: BookingStatus) {
     setTransitioning(bookingId);
     setConfirmNoShow(null);
+    setConfirmCancel(null);
     setTransitionErrors((prev) => ({ ...prev, [bookingId]: '' }));
     try {
       const res = await fetch(`/api/bookings/${bookingId}/status`, {
@@ -156,23 +166,79 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
     setTransitioning(null);
   }
 
-  // Express "now" in the shop's timezone — all time comparisons below use
-  // shop-local time so they are correct regardless of the client's OS timezone.
-  const nowInZone  = toZonedTime(now, timezone);
-  const todayStr   = format(nowInZone, 'yyyy-MM-dd');
+  async function cancelBooking(bookingId: string) {
+    setCancelling(bookingId);
+    setConfirmCancel(null);
+    setEditingNotesId(null);
+    setCancelErrors((prev) => ({ ...prev, [bookingId]: '' }));
+    try {
+      const res = await fetch(`/api/bookings/${bookingId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel' }),
+      });
+      if (res.ok) {
+        setLocalBookings((prev) => prev.filter((b) => b.id !== bookingId));
+        setLocalNextApt((prev) => (prev?.id === bookingId ? null : prev));
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setCancelErrors((prev) => ({
+          ...prev,
+          [bookingId]: data.error ?? 'Could not cancel booking. Please try again.',
+        }));
+      }
+    } catch {
+      setCancelErrors((prev) => ({
+        ...prev,
+        [bookingId]: 'Could not cancel booking. Please try again.',
+      }));
+    }
+    setCancelling(null);
+  }
+
+  async function saveNotes(bookingId: string) {
+    setNotesSaving(bookingId);
+    setNotesErrors((prev) => ({ ...prev, [bookingId]: '' }));
+    const notes = notesDraft[bookingId] ?? '';
+    try {
+      const res = await fetch(`/api/bookings/${bookingId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'update_notes', notes }),
+      });
+      if (res.ok) {
+        setLocalBookings((prev) =>
+          prev.map((b) => b.id === bookingId ? { ...b, notes } : b)
+        );
+        setEditingNotesId(null);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setNotesErrors((prev) => ({
+          ...prev,
+          [bookingId]: data.error ?? 'Could not save notes. Please try again.',
+        }));
+      }
+    } catch {
+      setNotesErrors((prev) => ({
+        ...prev,
+        [bookingId]: 'Could not save notes. Please try again.',
+      }));
+    }
+    setNotesSaving(null);
+  }
+
+  const nowInZone = toZonedTime(now, timezone);
+  const todayStr  = format(nowInZone, 'yyyy-MM-dd');
 
   const nextIsToday = localNextApt &&
     format(toZonedTime(parseISO(localNextApt.start_time), timezone), 'yyyy-MM-dd') === todayStr;
 
-  // Time indicator: find the last booking whose start is before now (shop time)
   const indicatorAfterIndex = localBookings.reduce((acc, b, i) => {
     const startZoned = toZonedTime(parseISO(b.start_time), timezone);
     return startZoned < nowInZone ? i : acc;
   }, -1);
 
   const THIRTY_MIN_MS_VAL = THIRTY_MIN_MS;
-
-  // Effective status for the highlight card (respects optimistic local overrides)
   const nextStatus = localNextApt ? getStatus(localNextApt) : null;
 
   return (
@@ -205,7 +271,6 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
               </div>
             </div>
 
-            {/* Action buttons vary by effective status */}
             {nextStatus === 'checked_in' ? (
               <div className="flex gap-2 flex-shrink-0">
                 <button
@@ -226,7 +291,6 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
                 </button>
               </div>
             ) : (
-              // Check In button: appears within 30 min of start (shop timezone)
               (toZonedTime(parseISO(localNextApt.start_time), timezone).getTime() - nowInZone.getTime()) <= THIRTY_MIN_MS_VAL &&
               nextStatus === 'confirmed' && (
                 <button
@@ -241,7 +305,6 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
             )}
           </div>
 
-          {/* No-show confirmation for highlight card */}
           {confirmNoShow === localNextApt.id && (
             <div className="mx-1 px-4 py-3 bg-dark-200 border border-gray-500/20 rounded-b-2xl -mt-1 flex items-center justify-between gap-3">
               <span className="text-xs text-gray-400">Mark this customer as a no show?</span>
@@ -262,7 +325,6 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
             </div>
           )}
 
-          {/* Inline transition error for highlight card */}
           {transitionErrors[localNextApt.id] && (
             <div className="mx-1 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-b-2xl -mt-1 text-xs text-red-400">
               {transitionErrors[localNextApt.id]}
@@ -301,10 +363,12 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
             const withinWindow = (startZoned.getTime() - nowInZone.getTime()) <= THIRTY_MIN_MS_VAL;
             const busy         = transitioning === b.id;
             const isHighlighted = highlightedIds[b.id];
+            const isEditing    = editingNotesId === b.id;
+            const history      = customerHistory[b.customer_id ?? ''];
+            const visitCount   = history?.visitCount ?? 0;
 
             return (
               <div key={b.id}>
-                {/* Time indicator line — position determined by shop-local time */}
                 {indicatorAfterIndex === idx && idx < localBookings.length - 1 && (
                   <div className="flex items-center gap-2 my-1">
                     <div className="flex-1 h-px bg-gold/40" />
@@ -329,20 +393,93 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
                     }`}
                   >
                     {/* Left: customer info */}
-                    <div className="flex items-start gap-3 min-w-0">
+                    <div className="flex items-start gap-3 min-w-0 flex-1">
                       <div className="w-10 h-10 rounded-full bg-gold-muted border border-gold/20 flex items-center justify-center font-bold text-gold text-sm flex-shrink-0">
                         {b.customer?.full_name?.charAt(0) ?? '?'}
                       </div>
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <div className="font-medium truncate">{b.customer?.full_name ?? 'Unknown'}</div>
                         <div className="text-xs text-gray-500 truncate">{b.customer?.email}</div>
-                        {b.notes && (
-                          <div className="text-xs text-gray-400 mt-0.5 truncate">{b.notes}</div>
+
+                        {/* Customer visit history */}
+                        {visitCount === 0 ? (
+                          <div className="text-xs text-emerald-400 mt-0.5">First visit</div>
+                        ) : visitCount === 1 ? (
+                          <div className="text-xs text-gray-500 mt-0.5">1 previous visit</div>
+                        ) : (
+                          <div className="text-xs text-gray-500 mt-0.5">
+                            {visitCount} previous visits
+                            {history.lastVisitDate && (
+                              <> · Last seen {formatDistanceToNow(parseISO(history.lastVisitDate), { addSuffix: true })}</>
+                            )}
+                          </div>
                         )}
+
+                        {/* Notes display / inline editor */}
+                        <div className="mt-1" onClick={(e) => e.stopPropagation()}>
+                          {isEditing ? (
+                            <div>
+                              <textarea
+                                value={notesDraft[b.id] ?? ''}
+                                onChange={(e) =>
+                                  setNotesDraft((prev) => ({ ...prev, [b.id]: e.target.value }))
+                                }
+                                maxLength={500}
+                                rows={2}
+                                placeholder="Add a note…"
+                                className="w-full text-xs bg-dark-300 border border-dark-400 rounded-lg px-2 py-1.5 text-gray-300 placeholder:text-gray-600 resize-none focus:outline-none focus:ring-1 focus:ring-gold"
+                              />
+                              <div className="flex items-center justify-between mt-1">
+                                <span className="text-xs text-gray-600">
+                                  {(notesDraft[b.id] ?? '').length}/500
+                                </span>
+                                <div className="flex gap-3">
+                                  <button
+                                    onClick={() => setEditingNotesId(null)}
+                                    className="text-xs text-gray-500 hover:text-white transition-colors"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    onClick={() => saveNotes(b.id)}
+                                    disabled={notesSaving === b.id}
+                                    className="text-xs font-medium text-gold hover:text-gold-light transition-colors disabled:opacity-50"
+                                  >
+                                    {notesSaving === b.id ? 'Saving…' : 'Save'}
+                                  </button>
+                                </div>
+                              </div>
+                              {notesErrors[b.id] && (
+                                <div className="text-xs text-red-400 mt-0.5">{notesErrors[b.id]}</div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5">
+                              {b.notes ? (
+                                <div className="text-xs text-gray-400 truncate flex-1">{b.notes}</div>
+                              ) : (
+                                <span className="text-xs text-gray-600">Add note</span>
+                              )}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingNotesId(b.id);
+                                  setNotesDraft((prev) => ({ ...prev, [b.id]: b.notes ?? '' }));
+                                  setConfirmCancel(null);
+                                  setConfirmNoShow(null);
+                                }}
+                                aria-label="Edit notes"
+                                className="text-gray-600 hover:text-gray-400 transition-colors flex-shrink-0"
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
 
-                    {/* Right: time, duration, badge, actions — stopPropagation prevents card link from firing on button tap */}
+                    {/* Right: time, duration, badge, actions */}
                     <div
                       className="flex flex-col items-end gap-1 flex-shrink-0 ml-3"
                       onClick={(e) => e.stopPropagation()}
@@ -388,7 +525,6 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
                               </button>
                             </>
                           )}
-                          {/* Direct no-show from confirmed past appointments */}
                           {status === 'confirmed' && isPast && (
                             <button
                               onClick={() => setConfirmNoShow(b.id)}
@@ -400,6 +536,21 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
                             </button>
                           )}
                         </div>
+                      )}
+
+                      {/* Cancel text link — only for confirmed bookings */}
+                      {status === 'confirmed' && !isDone && (
+                        <button
+                          onClick={() => {
+                            setConfirmCancel(b.id);
+                            setConfirmNoShow(null);
+                            setEditingNotesId(null);
+                          }}
+                          disabled={cancelling === b.id}
+                          className="text-xs text-red-400/60 hover:text-red-400 transition-colors mt-0.5 disabled:opacity-50"
+                        >
+                          {cancelling === b.id ? '…' : 'Cancel'}
+                        </button>
                       )}
                     </div>
                   </div>
@@ -426,10 +577,38 @@ export default function TodayAppointmentsSection({ todayBookings, nextAppointmen
                   </div>
                 )}
 
+                {/* Cancel confirmation inline */}
+                {confirmCancel === b.id && (
+                  <div className="mx-1 px-4 py-3 bg-dark-200 border border-red-500/20 rounded-b-xl -mt-1 flex items-center justify-between gap-3">
+                    <span className="text-xs text-gray-400">Cancel this appointment? This cannot be undone.</span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setConfirmCancel(null)}
+                        className="px-3 py-1 text-xs text-gray-500 hover:text-white transition-colors"
+                      >
+                        Keep it
+                      </button>
+                      <button
+                        onClick={() => cancelBooking(b.id)}
+                        className="px-3 py-1 text-xs font-medium bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 transition-colors"
+                      >
+                        Yes, Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* Inline transition error */}
                 {transitionErrors[b.id] && (
                   <div className="mx-1 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-b-xl -mt-1 text-xs text-red-400">
                     {transitionErrors[b.id]}
+                  </div>
+                )}
+
+                {/* Inline cancel error */}
+                {cancelErrors[b.id] && (
+                  <div className="mx-1 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-b-xl -mt-1 text-xs text-red-400">
+                    {cancelErrors[b.id]}
                   </div>
                 )}
               </div>
